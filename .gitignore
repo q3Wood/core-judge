@@ -1,0 +1,26 @@
+# === 1. 编译构建产物 (CMake & Make) ===
+build/
+bin/
+*.o
+*.obj
+*.so
+*.a
+core-judge          # 最终编译出来的可执行程序本身不要提交
+
+# === 2. IDE 与 编辑器配置 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# === 3. 评测临时工作目录 (极为重要) ===
+var/workspace/*
+!var/workspace/.gitkeep
+
+# === 4. 调试与核心转储文件 ===
+*.dSYM/
+*.log
+core
+core.*
