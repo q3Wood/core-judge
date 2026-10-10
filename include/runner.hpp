@@ -16,7 +16,7 @@ struct ExecutionResult {
     int cpu_time_ms;
     int memory_kb;
     int exit_code;
-    int term_signal;            // 导致的信号（0表示正常退出）
+    int signal;            // 导致的信号（0表示正常退出）
     bool is_wall_timeout;       // 看门狗触发
 };
 

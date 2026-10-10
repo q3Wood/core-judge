@@ -195,7 +195,7 @@ struct ExecutionResult {
     int cpu_time_ms;
     int memory_kb;
     int exit_code;
-    int term_signal;
+    int signal;
     bool is_wall_timeout;       // 看门狗触发
 };
 
