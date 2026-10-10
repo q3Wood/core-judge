@@ -16,7 +16,6 @@
 
 namespace fs = std::filesystem;
 
-// ANSI 终端颜色转义码
 namespace Color {
     const std::string RESET   = "\033[0m";
     const std::string RED     = "\033[31m";
@@ -37,7 +36,6 @@ struct CLIConfig {
     bool json_output = false;
 };
 
-// 命令行参数解析
 CLIConfig parse_arguments(int argc, char* argv[]) {
     CLIConfig config;
     for (int i = 1; i < argc; ++i) {
@@ -52,7 +50,6 @@ CLIConfig parse_arguments(int argc, char* argv[]) {
     return config;
 }
 
-// 终端彩色化展示
 void print_colored_verdict(Verdict v) {
     switch (v) {
         case Verdict::AC:  std::cout << Color::GREEN << "[Accepted] " << Color::RESET; break;
@@ -66,6 +63,30 @@ void print_colored_verdict(Verdict v) {
     }
 }
 
+// 信号转具体可读原因
+std::string get_signal_description(int sig, bool is_wall_timeout) {
+    if (is_wall_timeout) return "Terminated by Watchdog (Wall Clock Timeout)";
+    switch (sig) {
+        case SIGSEGV: return "Segmentation fault (Invalid memory access / Null pointer)";
+        case SIGFPE:  return "Floating point exception (Division by zero)";
+        case SIGXCPU: return "CPU time limit exceeded";
+        case SIGXFSZ: return "File size limit exceeded (Output bomb)";
+        case SIGABRT: return "Aborted (Assertion failed or std::terminate)";
+        case SIGKILL: return "Process killed (SIGKILL)";
+        default:      return sig == 0 ? "Normal exit" : ("Killed by signal " + std::to_string(sig));
+    }
+}
+
+// 辅助排序：优先按纯数字排序 (1, 2 ... 10)，非纯数字按字母序
+bool natural_case_compare(const std::string& a, const std::string& b) {
+    bool a_is_num = !a.empty() && std::all_of(a.begin(), a.end(), ::isdigit);
+    bool b_is_num = !b.empty() && std::all_of(b.begin(), b.end(), ::isdigit);
+    if (a_is_num && b_is_num) {
+        return std::stoll(a) < std::stoll(b);
+    }
+    return a < b;
+}
+
 int main(int argc, char* argv[]) {
     CLIConfig config = parse_arguments(argc, argv);
 
@@ -74,7 +95,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 1. 初始化临时评测工作空间 (/tmp/core_judge_xxxx)
     std::string run_id = std::to_string(getpid());
     fs::path workspace = fs::temp_directory_path() / ("core_judge_" + run_id);
     fs::create_directories(workspace);
@@ -84,7 +104,7 @@ int main(int argc, char* argv[]) {
     report.max_time_ms = 0;
     report.peak_memory_kb = 0;
 
-    // 2. 编译阶段
+    // 1. 编译阶段
     fs::path exe_path = workspace / "solution_bin";
     CompileConfig comp_cfg{config.src_path, exe_path.string(), config.lang, 10};
 
@@ -98,7 +118,7 @@ int main(int argc, char* argv[]) {
         report.compile_log = comp_res.log;
 
         if (config.json_output) {
-            std::cout << "{\"verdict\":\"CE\",\"compile_log\":\"" << comp_res.log << "\"}\n";
+            std::cout << "{\"verdict\":\"Compile Error\",\"compile_log\":\"" << comp_res.log << "\",\"details\":[]}\n";
         } else {
             print_colored_verdict(Verdict::CE);
             std::cout << "\n--- Compiler stderr ---\n" << comp_res.log << "------------------------\n";
@@ -112,24 +132,27 @@ int main(int argc, char* argv[]) {
         std::cout << Color::BOLD << ">>> Evaluating Test Cases:" << Color::RESET << "\n";
     }
 
-    // 3. 收集并配对测试用例 (.in 与 .ans)
-    std::map<std::string, std::pair<fs::path, fs::path>> test_cases;
+    // 2. 收集并配对测试用例 (.in 与 .ans/.out)
+    std::map<std::string, std::pair<fs::path, fs::path>> raw_cases;
     for (const auto& entry : fs::directory_iterator(config.prob_dir)) {
         if (!entry.is_regular_file()) continue;
         std::string ext = entry.path().extension().string();
         std::string stem = entry.path().stem().string();
 
-        if (ext == ".in") {
-            test_cases[stem].first = entry.path();
-        } else if (ext == ".ans" || ext == ".out") {
-            test_cases[stem].second = entry.path();
-        }
+        if (ext == ".in") raw_cases[stem].first = entry.path();
+        else if (ext == ".ans" || ext == ".out") raw_cases[stem].second = entry.path();
     }
 
+    // 转为按自然数排序的列表
+    std::vector<std::pair<std::string, std::pair<fs::path, fs::path>>> sorted_cases(raw_cases.begin(), raw_cases.end());
+    std::sort(sorted_cases.begin(), sorted_cases.end(), [](const auto& a, const auto& b) {
+        return natural_case_compare(a.first, b.first);
+    });
+
     int case_id = 0;
-    for (const auto& [name, files] : test_cases) {
+    for (const auto& [name, files] : sorted_cases) {
         case_id++;
-        if (files.first.empty() || files.second.empty()) continue; // 不成对则跳过
+        if (files.first.empty() || files.second.empty()) continue;
 
         fs::path user_out = workspace / (name + ".user.out");
         SandboxConfig run_cfg;
@@ -139,7 +162,6 @@ int main(int argc, char* argv[]) {
         run_cfg.time_limit_ms = config.time_limit_ms;
         run_cfg.memory_limit_kb = config.memory_limit_mb * 1024;
 
-        // 4. 执行沙箱评测
         ExecutionResult exec_res = SandboxRunner::run(run_cfg);
 
         TestCaseResult case_result;
@@ -148,55 +170,75 @@ int main(int argc, char* argv[]) {
         case_result.memory_kb = exec_res.memory_kb;
         case_result.exit_code = exec_res.exit_code;
         case_result.signal = exec_res.signal;
+        case_result.message = get_signal_description(exec_res.signal, exec_res.is_wall_timeout);
 
         report.max_time_ms = std::max(report.max_time_ms, exec_res.cpu_time_ms);
         report.peak_memory_kb = std::max(report.peak_memory_kb, exec_res.memory_kb);
 
-        // 5. 判定状态收敛
+        // 状态判定
         if (exec_res.is_wall_timeout || exec_res.signal == SIGXCPU) {
             case_result.verdict = Verdict::TLE;
         } else if (exec_res.signal == SIGXFSZ) {
             case_result.verdict = Verdict::OLE;
         } else if (exec_res.signal != 0 || exec_res.exit_code != 0) {
             case_result.verdict = Verdict::RE;
-            case_result.message = "Signal " + std::to_string(exec_res.signal);
+            if (exec_res.signal == 0) case_result.message = "Non-zero exit code: " + std::to_string(exec_res.exit_code);
         } else if (exec_res.memory_kb > config.memory_limit_mb * 1024) {
             case_result.verdict = Verdict::MLE;
+            case_result.message = "Memory limit exceeded";
         } else {
-            // 运行无异常，进入比对环节
             CheckStatus diff_status = Checker::strict_diff(user_out.string(), files.second.string());
             if (diff_status == CheckStatus::MATCH) {
                 case_result.verdict = Verdict::AC;
+                case_result.message = "Correct answer";
             } else {
                 case_result.verdict = Verdict::WA;
+                case_result.message = "Output mismatch";
             }
         }
 
         report.details.push_back(case_result);
 
-        // 终端实时打印单点状态
+        // 终端可视化展示
         if (!config.json_output) {
             std::cout << "  Point #" << std::left << std::setw(3) << case_id << " [" << name << "]: ";
             print_colored_verdict(case_result.verdict);
             std::cout << " | Time: " << std::setw(4) << case_result.time_ms << "ms"
-                      << " | Mem: " << std::setw(6) << case_result.memory_kb << "KB\n";
+                      << " | Mem: " << std::setw(6) << case_result.memory_kb << "KB";
+            if (case_result.verdict != Verdict::AC) {
+                std::cout << " | Reason: " << Color::RED << case_result.message << Color::RESET;
+            }
+            std::cout << "\n";
         }
 
-        // 首错即止（Fail-Fast）
         if (case_result.verdict != Verdict::AC) {
             report.final_verdict = case_result.verdict;
             break;
         }
     }
 
-    // 6. 清理临时沙箱
     fs::remove_all(workspace);
 
-    // 7. 汇报最终结果
+    // 3. 最终汇总输出
     if (config.json_output) {
-        std::cout << "{\"verdict\":\"" << verdict_to_string(report.final_verdict) << "\","
+        std::cout << "{"
+                  << "\"verdict\":\"" << verdict_to_string(report.final_verdict) << "\","
                   << "\"max_time_ms\":" << report.max_time_ms << ","
-                  << "\"peak_memory_kb\":" << report.peak_memory_kb << "}\n";
+                  << "\"peak_memory_kb\":" << report.peak_memory_kb << ","
+                  << "\"details\":[";
+        for (size_t i = 0; i < report.details.size(); ++i) {
+            const auto& d = report.details[i];
+            std::cout << "{"
+                      << "\"id\":" << d.id << ","
+                      << "\"verdict\":\"" << verdict_to_string(d.verdict) << "\","
+                      << "\"time_ms\":" << d.time_ms << ","
+                      << "\"memory_kb\":" << d.memory_kb << ","
+                      << "\"exit_code\":" << d.exit_code << ","
+                      << "\"signal\":" << d.signal << ","
+                      << "\"message\":\"" << d.message << "\""
+                      << "}" << (i + 1 < report.details.size() ? "," : "");
+        }
+        std::cout << "]}\n";
     } else {
         std::cout << "\n" << Color::BOLD << "================ Final Report ================" << Color::RESET << "\n";
         std::cout << "Final Verdict: ";

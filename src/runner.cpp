@@ -74,7 +74,23 @@ ExecutionResult SandboxRunner::run(const SandboxConfig& config) {
         rl_core.rlim_max = 0;
         setrlimit(RLIMIT_CORE, &rl_core);
 
-        // 1.3 执行目标程序
+
+        // (e) 【新增】最大进程数限制：禁止繁衍任何子进程 (防死 Fork 炸弹)
+        struct rlimit rl_nproc;
+        rl_nproc.rlim_cur = 1;
+        rl_nproc.rlim_max = 1;
+        setrlimit(RLIMIT_NPROC, &rl_nproc);
+
+        // -----------------------------------------------------------------
+        // 1.3 【新增】安全权限降级 (Privilege Dropping)
+        // 如果当前是 root 权限 (如在 Docker 容器内)，子进程在运行前强制降权为 nobody (UID: 65534)
+        // -----------------------------------------------------------------
+        if (getuid() == 0) {
+            setgid(65534); // 降为 nogroup
+            setuid(65534); // 降为 nobody
+        }
+
+        // 1.4 执行目标程序
         char* args[] = { const_cast<char*>(config.exe_path.c_str()), nullptr };
         char* envp[] = { nullptr }; // 清空环境变量
         execve(config.exe_path.c_str(), args, envp);
